@@ -9,14 +9,26 @@ import (
 	"time"
 )
 
+// states - Custom type to hold value for Released, Wanted and Held
+type State int
+
+const (
+	RELEASED State = iota // EnumIndex = 0
+	WANTED                // EnumIndex = 1
+	HELD                  // EnumIndex = 2
+)
+
 // Variáveis globais interessantes para o processo
-var err string             //
-var myPort string          //porta do meu servidor
-var nServers int           //qtde de outros processo
-var CliConn []*net.UDPConn //vetor com conexões para os servidores
-// dos outros processos
-var ServConn *net.UDPConn //conexão do meu servidor (onde recebo mensagens dos outros processos)
-var logicalClock int      //Relogio logico escalar interno
+var err string             // Error string
+var myPort string          // porta do meu servidor
+var nServers int           // qtde de outros processo
+var CliConn []*net.UDPConn // vetor com conexões para os servidores dos outros processos
+var ServConn *net.UDPConn  // conexão do meu servidor (onde recebo mensagens dos outros processos)
+var replyQueue []int       // Reply queue
+var logicalClock int       // Relogio logico escalar interno
+var state State            // Estado da requisicao do processo
+var numOfReply int         // Numero de reply recebidos
+var T int                  // Time when this process requests CS
 
 func CheckError(err error) {
 	if err != nil {
@@ -30,21 +42,92 @@ func PrintError(err error) {
 	}
 }
 
-func updateLClock(buf []byte, n int) {
+func parceMsg(buf []byte, n int) (int, string, string) {
 	var i int
 	for i = 0; i < n; i++ {
 		if buf[i] == ':' {
 			break
 		}
 	}
-
+	var j int
+	for j = n - 1; j >= 0; j-- {
+		if buf[j] == ':' {
+			break
+		}
+	}
 	otherclock, err := strconv.Atoi(string(buf[0:i]))
 	CheckError(err)
-	fmt.Println("Printed inside updateLClock", otherclock)
+	port := string(buf[i+1 : j])
+	R := string(buf[j+1 : n])
+	return otherclock, port, R
+}
+
+func updateLClock(otherclock int) {
 	if otherclock > logicalClock {
 		logicalClock = otherclock
 	}
 	logicalClock++
+}
+
+func compareLClock(otherClock int, otherPort string) bool {
+	myPortINT, err := strconv.Atoi(myPort[1:])
+	CheckError(err)
+	otherPortINT, err := strconv.Atoi(otherPort)
+	CheckError(err)
+	if T < otherClock {
+		return true
+	} else if T == otherClock && myPortINT <= otherPortINT {
+		return true
+	}
+	return false
+}
+
+func checkMsg(buf []byte, n int) {
+	otherClock, otherPort, R := parceMsg(buf, n)
+	updateLClock(otherClock)
+
+	CliConnMAP := make(map[string]int) //
+	CliConnMAP = CliConnMapper()
+
+	switch R {
+	case "REPLY":
+		fmt.Println("Time", logicalClock, ":", otherPort, ", I got your REPLY!")
+		numOfReply++
+	case "REQUEST":
+		fmt.Println("Time", logicalClock, ":", otherPort, "do you want my reply?")
+		if (state == HELD) || (state == WANTED && compareLClock(otherClock, otherPort)) {
+			fmt.Println("Time", logicalClock, ":", otherPort, "you can't have my reply.")
+			replyQueue = append(replyQueue, CliConnMAP[otherPort])
+		} else {
+			fmt.Println("Time", logicalClock, ":", otherPort, "! You have my REPLY!")
+			go doClientJob(CliConnMAP[otherPort], logicalClock, "REPLY")
+		}
+	default:
+		fmt.Println("Received: ", R)
+		fmt.Println("Wrong protocol.")
+
+	}
+}
+
+func checkNumReply() {
+	if numOfReply == nServers {
+		fmt.Println("Time", logicalClock, ":Now I, ID:", myPort[1:], ", have CS.")
+		state = HELD
+	}
+}
+
+func multiCastRequest() {
+	fmt.Println("Time", logicalClock, ":Guys, I need CS!")
+	for j := 0; j < nServers; j++ {
+		go doClientJob(j, logicalClock, "REQUEST")
+	}
+}
+
+func multiCastReply(replyQueue []int) {
+	for len(replyQueue) > 0 {
+		go doClientJob(replyQueue[0], logicalClock, "REPLY")
+		replyQueue = replyQueue[1:]
+	}
 }
 
 func doServerJob() {
@@ -54,18 +137,26 @@ func doServerJob() {
 		//Ler (uma vez somente) da conexão UDP a mensagem
 		//Escrever na tela a msg recebida (indicando o endereço de quem enviou)
 		buf := make([]byte, 1024)
-		n, addr, err := ServConn.ReadFromUDP(buf)
-		updateLClock(buf, n)
-		fmt.Println("Received ", string(buf[0:n]), " from ", addr, " at my clock ", logicalClock)
+		n, _, err := ServConn.ReadFromUDP(buf)
+		checkMsg(buf, n)
+		// fmt.Println("Received ", string(buf[0:n]), " from ", addr, " at my clock ", logicalClock)
 		CheckError(err)
 	}
 }
-func doClientJob(otherProcess int, clock int) {
+func doClientJob(otherProcess int, clock int, R string) {
 	//Enviar msg <T,pi> para o servidor do processo otherServer.
-	msg := strconv.Itoa(clock) + myPort
+	msg := strconv.Itoa(clock) + myPort + ":" + R
 	buf := []byte(msg)
 	_, err := CliConn[otherProcess].Write(buf)
 	CheckError(err)
+}
+
+func CliConnMapper() map[string]int {
+	CliConnMAP := make(map[string]int) //Mapa que associa o nome dos outros processos com index do vetor CliConn
+	for i := 0; i < nServers; i++ {
+		CliConnMAP[os.Args[i+2][1:len(os.Args[i+2])]] = i
+	}
+	return CliConnMAP
 }
 
 // ESSA FUNÇÃO ESTÁ PRONTA
@@ -114,6 +205,11 @@ func main() {
 		defer CliConn[i].Close()
 	}
 
+	fmt.Println("To request critical section type: REQ")
+	fmt.Println("To exit critical section type: REL")
+	fmt.Println("To check state type: STA")
+	state = RELEASED
+
 	ch := make(chan string) //canal que guarda itens lidos do teclado
 	go readInput(ch)        //chamar rotina que ”escuta” o teclado
 	go doServerJob()
@@ -122,22 +218,35 @@ func main() {
 		select {
 		case x, valid := <-ch:
 			if valid {
-				fmt.Printf("Recebi do teclado: %s \n", x)
-				fmt.Printf("Meu relogio diz %d \n", logicalClock)
-				if x != "1" {
-					var msgVect [2]string
-					msgVect[0] = x
-					msgVect[1] = strconv.Itoa(logicalClock)
-					for j := 0; j < nServers; j++ {
-						go doClientJob(j, logicalClock)
+				if x == "REQ" {
+					state = WANTED
+					multiCastRequest()
+					T = logicalClock // Time when I requested CS
+				}
+				if x == "REL" {
+					state = RELEASED
+					fmt.Println("Time", logicalClock, ":Guys, I no longer need CS!")
+					numOfReply = 0
+					multiCastReply(replyQueue)
+				}
+				if x == "STA" {
+					var stateName string
+					switch state {
+					case RELEASED:
+						stateName = "RELEASED"
+					case WANTED:
+						stateName = "WANTED"
+					case HELD:
+						stateName = "HELD"
 					}
+					fmt.Println("Time", logicalClock, ":My ID(", myPort[1:], ") current state is", stateName)
 				}
 			} else {
 				fmt.Println("Canal fechado!")
 			}
 		default:
-			// Fazer nada!
 			// Mas não fica bloqueado esperando o teclado
+			checkNumReply() // Checa se recebeu todos os REPLY
 			time.Sleep(time.Second * 1)
 		}
 		// Esperar um pouco
