@@ -10,14 +10,13 @@ import (
 )
 
 // Variáveis globais interessantes para o processo
-var err string
+var err string             //
 var myPort string          //porta do meu servidor
 var nServers int           //qtde de outros processo
 var CliConn []*net.UDPConn //vetor com conexões para os servidores
 // dos outros processos
-var ServConn *net.UDPConn //conexão do meu servidor (onde recebo
-// mensagens dos outros processos)
-var logicalClock int
+var ServConn *net.UDPConn //conexão do meu servidor (onde recebo mensagens dos outros processos)
+var logicalClock int      //Relogio logico escalar interno
 
 func CheckError(err error) {
 	if err != nil {
@@ -30,29 +29,43 @@ func PrintError(err error) {
 		fmt.Println("Erro: ", err)
 	}
 }
+
+func updateLClock(buf []byte, n int) {
+	var i int
+	for i = 0; i < n; i++ {
+		if buf[i] == ':' {
+			break
+		}
+	}
+
+	otherclock, err := strconv.Atoi(string(buf[0:i]))
+	CheckError(err)
+	fmt.Println("Printed inside updateLClock", otherclock)
+	if otherclock > logicalClock {
+		logicalClock = otherclock
+	}
+	logicalClock++
+}
+
 func doServerJob() {
 
 	//Loop infinito mesmo
 	for {
 		//Ler (uma vez somente) da conexão UDP a mensagem
-		//Escrever na tela a msg recebida (indicando o
-		//endereço de quem enviou)
-		//FALTA ALGO AQUI
+		//Escrever na tela a msg recebida (indicando o endereço de quem enviou)
 		buf := make([]byte, 1024)
 		n, addr, err := ServConn.ReadFromUDP(buf)
-		fmt.Println("Received ", string(buf[0:n]), " from ", addr, " at clock ", logicalClock)
+		updateLClock(buf, n)
+		fmt.Println("Received ", string(buf[0:n]), " from ", addr, " at my clock ", logicalClock)
 		CheckError(err)
 	}
 }
-func doClientJob(otherProcess int, i int) {
-	//Enviar uma mensagem (com valor i) para o servidor do processo
-	//otherServer.
-
-	msg := strconv.Itoa(i)
+func doClientJob(otherProcess int, clock int) {
+	//Enviar msg <T,pi> para o servidor do processo otherServer.
+	msg := strconv.Itoa(clock) + myPort
 	buf := []byte(msg)
 	_, err := CliConn[otherProcess].Write(buf)
 	CheckError(err)
-
 }
 
 // ESSA FUNÇÃO ESTÁ PRONTA
@@ -89,33 +102,26 @@ func readInput(ch chan string) {
 		text, _, _ := reader.ReadLine()
 		ch <- string(text)
 	}
+	println(ch)
 
 }
 
-// ESSA FUNÇÃO ESTÁ PRONTA
 func main() {
 	initConnections()
-	logicalClock := 0
-	//O fechamento de conexões deve ficar aqui, assim só fecha
-	//conexão quando a main morrer
+	//O fechamento de conexões deve ficar aqui, assim só fecha conexão quando a main morrer
 	defer ServConn.Close()
 	for i := 0; i < nServers; i++ {
 		defer CliConn[i].Close()
 	}
 
-	/*Todo Process fará a mesma coisa: ficar ouvindo mensagens e man-
-	dar infinitos i’s para os outros processos*/
-
 	ch := make(chan string) //canal que guarda itens lidos do teclado
 	go readInput(ch)        //chamar rotina que ”escuta” o teclado
 	go doServerJob()
 	for {
-		// Verificar (de forma não bloqueante) se tem algo no
-		// stdin (input do terminal)
+		// Verificar (de forma não bloqueante) se tem algo no stdin (input do terminal)
 		select {
 		case x, valid := <-ch:
 			if valid {
-				logicalClock++
 				fmt.Printf("Recebi do teclado: %s \n", x)
 				fmt.Printf("Meu relogio diz %d \n", logicalClock)
 				if x != "1" {
@@ -138,16 +144,5 @@ func main() {
 		time.Sleep(time.Second * 1)
 
 	}
-	/*
-		go doServerJob()
-		i := 0
-		for {
-			for j := 0; j < nServers; j++ {
-				go doClientJob(j, i)
-			}
-			// Espera um pouco
-			time.Sleep(time.Second * 1)
-			i++
-		}
-	*/
+
 }
